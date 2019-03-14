@@ -1,0 +1,254 @@
+#! /usr/bin/perl
+# DOC ##########################################################################
+# Program: expand_net
+# Usage:	expand_net [-r] network [network . . .]
+# Arguments:	-r - randomize the resulting host IPs
+# Purpose:
+#	Expand a network specification into a list of IP addresses.
+#	The network specification can be in any of the following formats:
+#		###.###.###.###/SS	- CIDR (PREFERRED)
+#		###.###.###.AA-BBB 	- range of IP addresses
+#		###.###.###.* 		- wildcarded octet
+# Return Code:	0 = Success
+#		1 = Faliure
+# Comments:
+#	The range and wildcard methods do not make any special consideration 
+#	for the network and broadcast addresses as the true network/subnet
+#	is not known.  The CIDR notation method does handle network and
+#	broadcast addresses correctly, removing them from the list of IP
+#	addresses.  Use the CIDR notation whenever possible.
+########################################################################## DOC #
+# Revision History #############################################################
+# 	24 Feb 99 - KOR - created
+#	14 Sep 99 - KOR - fixed usage and added randomize parameter
+#	15 May 00 - KOR - fixed CIDR address expansion
+#       23 Jul 02 - AVB - fixed cascadeing ip problem - now deletes first and last of each network
+#	28 Oct 08 - KRS - added range of CIDR blocks and multi-range address lists (i.e. dashes in other than last octet)
+#       10 Aug 15 - ACB - fixes/enhancements
+############################################################# Revision History #
+
+use POSIX;
+use English;
+use strict;
+
+if ($#ARGV == -1) 
+{
+    print STDERR "Usage: expand_net [-r] network [network . . .]\n";
+    print STDERR "       -r - randomize IP address order\n";
+    print STDERR "       network can be in any of the following formats:\n";
+    print STDERR "         ###.###.###.###/SS	- CIDR (PREFERRED)\n";
+    print STDERR "	       ###.###.A-B.###/SS	- CIDR Range\n";
+    print STDERR "         ###.###.A-B.C-D		- multi-range of IP addresses\n";
+    print STDERR "         ###.###.###.AA-BBB 	- range of IP addresses\n";
+    print STDERR "         ###.###.###.* 		- wildcarded octet\n";
+    print STDERR "       CIDR addresses are validated and expanded properly, giving a list of\n";
+    print STDERR "       hosts only; the network and broadcast addresses are excluded.\n";
+    print STDERR "                                                           version 1.2 - KOR\n";
+    print STDERR "								 version 1.3 - KRS\n";
+    exit 1;
+}
+
+my $random = 0;
+my $csv = 0;
+my @IPList;
+my $cnt;
+
+for ($cnt = 0; $cnt < $#ARGV + 1; $cnt++) {
+    if ($ARGV[$cnt] eq "-r") {
+		$random = 1;
+		next;
+    } elsif ($ARGV[$cnt] eq "-c") {
+		$csv = 1;
+		next;
+	} 
+
+    my @ktemp = &expand_net($ARGV[$cnt]);
+    push(@IPList,@ktemp);
+}
+
+($random == 1) && randomize(@IPList);
+
+for ($cnt = 0; $cnt < $#IPList + 1; $cnt++) {
+    ($IPList[$cnt] eq "TRIM") && next;
+
+	print "$IPList[$cnt]";
+	
+	if ($csv == 1 && $cnt<$#IPList) {
+		print ",";
+	} else {
+		print "\n";
+	}
+}
+
+exit 0;
+
+################################################################################
+sub expand_net() {
+    my @expand_net_rtn;
+    my $netToExpand = shift;
+    my $cnt;
+    my @byte;
+
+    if ($netToExpand =~ m/\*/) {
+	@byte = split('\.',$netToExpand);
+
+	for ($cnt = 0; $cnt < 4; $cnt++) {
+	    ($byte[$cnt] =~ m/\*/)	&& ($byte[$cnt]="0-255"||next);
+	    ($byte[$cnt] == "")	&& ($byte[$cnt]="0-255"||next);
+	}
+
+	$netToExpand = join('.',@byte);
+    }
+
+    if ($netToExpand =~ m/\//) {
+	my @tempList;
+
+	if ($netToExpand =~ m/-/) {
+		push(@tempList,&expand_range($netToExpand,"NO"));
+	} else {
+		push(@tempList,$netToExpand);
+	}
+
+	for ($cnt = 0; $cnt < $#tempList + 1; $cnt++) {
+	    my $tempString = $tempList[$cnt];
+
+	    if ($tempString =~ m/\//) {
+		my @work = split('/', $tempString);
+		my @byte = split('\.', $work[0]);
+		my $base = $work[0];
+		my $mask_bits = $work[1];
+		my $cnt2;
+		my $base_raw;
+		my $top_raw;
+		my $base_byte;
+		my $top_byte;
+		my $mask;
+		my $bit;
+		my $num_hosts;
+		my $test_base;
+		my @new_byte;
+		
+		if ($mask_bits > 30) {
+		    print STDERR "Invalid net bits on CIDR address [$tempString]\n";
+		    exit 1;
+		}
+		
+		for ($bit = 0; $bit < 32; $bit++) {
+		    $mask <<= 1;
+		    ($bit < $mask_bits) && ($mask |= 0x00000001);
+		}
+		
+		$num_hosts = 2 ** (32 - $mask_bits) - 1;
+
+		for ($cnt2 = 0; $cnt2 < 4; $cnt2++) {
+		    $base_raw <<= 8; 
+		    $base_raw |= $byte[$cnt2];
+		}
+
+		$test_base = $base_raw & ~$mask;
+
+		if ($test_base != 0) {
+		    print STDERR "Invalid alignment on CIDR address [$tempString]\n";
+		    exit 1;
+		}
+
+		$top_raw = $base_raw + $num_hosts;
+
+		for ($cnt2 = 3; $cnt2 > -1; $cnt2--) {
+		    $base_byte = $base_raw & 0x000000FF;
+		    $top_byte = $top_raw & 0x000000FF;
+
+		    if ($base_byte == $top_byte) {
+			$new_byte[$cnt2] = $base_byte;
+		    } else {
+			$new_byte[$cnt2] = "$base_byte-$top_byte";
+		    }
+
+		    $base_raw >>= 8;
+		    $top_raw >>= 8;
+		}
+
+		$tempString = join('.',@new_byte);
+	    }
+
+	    push(@expand_net_rtn, &expand_range($tempString, "YES"));
+	}
+    } else {
+	push(@expand_net_rtn,&expand_range($netToExpand,"NO"));
+    }
+
+    return @expand_net_rtn;
+}
+
+################################################################################
+sub expand_range() {
+    my @expand_range_rtn;
+    my $rangeToExpand = shift;
+    my $trim = shift;
+    my @octets = split('\.', $rangeToExpand);
+    my $found = 0;
+    my $index;
+    my $cnt;
+
+    for ($index = 0; $index < 4; $index++) {
+	if ($octets[$index] =~ m/-/) {
+	    $found = 1;
+	    last;
+	}
+    }
+
+    if ($found == 0) {
+	for ($cnt = 0; $cnt < $#octets + 1; $cnt++) {
+	    if ($octets[$cnt] !~ m/\//) {
+		if ($octets[$cnt] < 0 || $octets[$cnt] > 255) {
+		    print STDERR "Invalid net specification [$rangeToExpand]\n";
+		    exit 1;
+		}
+	    }
+	}
+
+	push(@expand_range_rtn, $rangeToExpand);
+    } else {
+	my @lim = split('\-', $octets[$index]);
+
+	my $first = $lim[0];
+	my $last = $lim[$#lim];
+
+	if ($first > $last) {
+	    print STDERR "Invalid net range [$rangeToExpand]\n";
+	    exit 1;
+	}
+
+	for ($cnt = $first; $cnt <= $last; $cnt++) {
+	    $octets[$index] = $cnt;
+	    push(@expand_range_rtn, &expand_range(join(".",@octets),"NO"));
+	}
+    }
+
+    if ($trim eq "YES") {
+	$expand_range_rtn[0] = "TRIM";
+	$expand_range_rtn[$#expand_range_rtn] = "TRIM";
+    }
+
+    return @expand_range_rtn;
+}
+
+################################################################################
+sub randomize()
+{
+        my $cnt;
+        my $swap;
+        my $pos;
+
+        for ($cnt = 0; $cnt < $#_ + 1; $cnt++)
+        {
+                $pos = rand($#_ + 1);
+		my $tmp;
+                ($pos == $tmp) && next;
+
+                $swap = $_[$cnt];
+                $_[$cnt] = $_[$pos];
+                $_[$pos] = $swap;
+        }
+        return;
+}
